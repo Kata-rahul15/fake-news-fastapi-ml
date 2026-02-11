@@ -195,9 +195,11 @@ def fetch_page_playwright(url: str) -> str:
 
             page = context.new_page()
             page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_selector("h1", timeout=10000)
+
 
             html = page.content()
+            print("FIRST 1000 CHARS:", html[:1000])
             browser.close()
 
             # same safety checks as requests
@@ -3252,11 +3254,12 @@ def extract_profile_roles_playwright(url: str) -> dict:
             )
             page = context.new_page()
 
+
             print("➡️ Navigating to page...")
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
             html = page.content()
             print("📄 HTML size:", len(html))
-
+            print("PAGE TITLE:", page.title())
             browser.close()
             print("🛑 Browser closed")
 
