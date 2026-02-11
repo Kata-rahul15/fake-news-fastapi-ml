@@ -4100,17 +4100,34 @@ def duckduckgo_search(query: str, max_results: int = 6):
             url,
             data={"q": query},
             headers={
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://duckduckgo.com/",
                 "Content-Type": "application/x-www-form-urlencoded"
             },
-            timeout=8
+            timeout=12
         )
+
+        # 🔥 IMPORTANT: Spaces sometimes returns non-200 silently
+        if r.status_code != 200:
+            print("DuckDuckGo status:", r.status_code)
+            return []
 
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
-        for a in soup.find_all("a", class_="result__a", href=True):
-            results.append(a["href"])
+        for a in soup.select("a.result__a[href]"):
+            link = a["href"]
+
+            # 🟢 DuckDuckGo sometimes wraps links like /l/?uddg=...
+            if "uddg=" in link:
+                from urllib.parse import parse_qs, urlparse, unquote
+                qs = parse_qs(urlparse(link).query)
+                if "uddg" in qs:
+                    link = unquote(qs["uddg"][0])
+
+            results.append(link)
+
             if len(results) >= max_results:
                 break
 
