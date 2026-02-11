@@ -195,15 +195,14 @@ def fetch_page_playwright(url: str) -> str:
 
             page = context.new_page()
             page.goto(url, timeout=30000)
-            page.wait_for_selector("h1", timeout=10000)
-
+            page.wait_for_timeout(4000)
 
             html = page.content()
             print("FIRST 1000 CHARS:", html[:1000])
             browser.close()
 
             # same safety checks as requests
-            if not html or len(html) < 5000:
+            if not html or len(html) < 3000:
                 return ""
 
             return html
@@ -4691,12 +4690,19 @@ def ontology_supports(claim_role: str, evidence_text: str) -> bool:
 
     return False
 
+def extract_roles_from_text(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    roles = []
+
+    for tag in soup.find_all(["p","li","span","td","strong"]):
+        t = tag.get_text(" ", strip=True)
+        if any(r in t.lower() for r in ROLE_WORDS):
+            roles.append(t)
+
+    return roles
+
 def extract_role_from_claim(claim: str) -> str | None:
-    """
-    Extracts the role from simple identity claims.
-    Example:
-        'PM Modi is a politician' -> 'politician'
-    """
+    
     claim_l = claim.lower()
 
     m = re.search(r"\bis (a|an)\s+([a-z ]+)", claim_l)
