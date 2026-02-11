@@ -10,7 +10,6 @@ import requests
 from bs4 import BeautifulSoup
 from langdetect import detect
 from difflib import SequenceMatcher
-import easyocr
 import base64
 import numpy as np
 from playwright.sync_api import sync_playwright
