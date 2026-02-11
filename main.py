@@ -9,6 +9,8 @@ import torch
 import requests
 from bs4 import BeautifulSoup
 from langdetect import detect
+from difflib import SequenceMatcher
+import easyocr
 import base64
 import numpy as np
 from playwright.sync_api import sync_playwright
@@ -16,16 +18,19 @@ from PIL import Image
 import io
 from urllib.parse import urlparse
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from collections import Counter
 import re
 from readability import Document
 from typing import List, Tuple
 import json
+from math import log2
 from functools import lru_cache
 import hashlib
 from indicnlp.normalize.indic_normalize import IndicNormalizerFactory
 from sentence_transformers import SentenceTransformer, util
 from contextvars import ContextVar
 import json
+import pillow_avif
 import cv2
 from difflib import get_close_matches
 import wordfreq
@@ -39,8 +44,6 @@ from paddleocr import PaddleOCR
 import shutil
 if shutil.which("tesseract"):
     pytesseract.pytesseract.tesseract_cmd = "tesseract"
-
-
 # =========================================================
 # FASTAPI APP
 # =========================================================
