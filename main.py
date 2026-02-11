@@ -179,37 +179,61 @@ def fetch_page(url: str) -> str:
     except Exception:
         return ""
 
-
 def fetch_page_playwright(url: str) -> str:
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+
+            print("🧭 Launching browser...")
+
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            )
 
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120 Safari/537.36"
-                )
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US"
             )
 
             page = context.new_page()
+
+            print("➡️ Navigating to page...")
             page.goto(url, timeout=30000)
-            page.wait_for_timeout(4000)
+
+            # 🔥 IMPORTANT: networkidle fails on Cloudflare pages
+            page.wait_for_timeout(6000)
 
             html = page.content()
-            print("FIRST 1000 CHARS:", html[:1000])
-            browser.close()
 
-            # same safety checks as requests
-            if not html or len(html) < 3000:
+            print("PAGE TITLE:", page.title())
+            print("📄 HTML size:", len(html))
+
+            browser.close()
+            print("🛑 Browser closed")
+
+            # 🚨 Detect Cloudflare block page
+            if "Just a moment..." in html or "challenge-error-text" in html:
+                print("🚫 CLOUDFLARE BLOCK DETECTED — returning empty")
+                return ""
+
+            # keep your safety filter but reduce strictness
+            if not html or len(html) < 2000:
                 return ""
 
             return html
 
-    except Exception:
+    except Exception as e:
+        print("PLAYWRIGHT ERROR:", e)
         return ""
-
 
 
 
