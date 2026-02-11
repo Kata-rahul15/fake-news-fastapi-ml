@@ -4094,19 +4094,20 @@ def _extract_snippets(html: str, max_items: int = 5) -> List[str]:
 
 def duckduckgo_search(query: str, max_results: int = 6):
     try:
-        url = "https://html.duckduckgo.com/html/"
+        url = "https://duckduckgo.com/html/"
 
-        r = requests.post(
-            url,
-            data={"q": query},
+        r = requests.get(
+            "https://duckduckgo.com/html/",
+            params={"q": query},
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://duckduckgo.com/",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Referer": "https://duckduckgo.com/"
             },
             timeout=12
         )
+
 
         # 🔥 IMPORTANT: Spaces sometimes returns non-200 silently
         if r.status_code != 200:
