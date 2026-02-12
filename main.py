@@ -1017,24 +1017,19 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             playwright_failed = False   # ⭐ IMPORTANT FLAG
 
             # 🎭 Playwright ONLY for first PROFILE
-            if playwright_calls_used < MAX_PLAYWRIGHT_CALLS:
-                print(f"🎭 [PLAYWRIGHT] Using browser for PROFILE: {url}")
-                playwright_calls_used += 1
-                html = cached_fetch_page_playwright(url)
-            else:
-                print(f"⛔ [PLAYWRIGHT-SKIP] PROFILE skipped (limit reached): {url}")
-                html = None
-                playwright_failed = True
+            # 🎭 PROFILE FETCH — DO NOT launch Playwright here
+            # Let extract_profile_roles_playwright() handle the browser
 
-            # ⚠️ FAST FALLBACK if Playwright failed
+            html = None
+            playwright_failed = False
+
+            print(f"🎭 [PROFILE] Delegating Playwright to extractor: {url}")
+
+            # ⚠️ Optional FAST fallback HTML (only for text parsing, not roles)
+            html = cached_fetch_page(url)
+
             if not html:
-                print(f"⚠️ [PROFILE] Playwright empty — trying FAST fallback: {url}")
-                html = cached_fetch_page(url)
-                playwright_failed = True
-
-                if not html:
-                    print(f"❌ [PROFILE] Both Playwright + fallback failed: {url}")
-                    continue
+                print(f"⚠️ [PROFILE] Fast fetch returned empty — extractor will handle Playwright")
 
             # ==========================================================
             # 🔥 ROLE EXTRACTION — SAFE MODE
@@ -1232,9 +1227,11 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             # never send profile pages to RAG
             continue
         # 🚫 FIX 3: MODEL5 RULE — never do ARTICLE RAG for negated identity claims
-        if is_negated and claim_type == "IDENTITY_ROLE":
-            print("⛔ SKIPPING ARTICLE RAG — NEGATED IDENTITY CLAIM")
+        # ✅ Only skip article RAG if profile verification already succeeded
+        if is_negated and claim_type == "IDENTITY_ROLE" and profile_positive_confirmed:
+            print("⛔ SKIPPING ARTICLE RAG — PROFILE ALREADY VERIFIED")
             continue
+
 
         # ------------- NON-PROFILE: extract text once and run RAG for this URL -------------
         if page_type != "PROFILE":
