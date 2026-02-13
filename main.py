@@ -931,6 +931,9 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             print(f"PROFILE FAST PATH : {url}")
 
             html = cached_fetch_page(url)   # lightweight fallback only
+            if "Just a moment" in html or "Checking your browser" in html:
+                print("🚫 CLOUDFLARE BLOCK DETECTED")
+                return ""
 
             if not html:
                 print("⚠️ Fast fetch empty — extractor  will handle DOM")
@@ -3253,8 +3256,17 @@ def extract_profile_roles(url: str):
     if "vbithyd.ac.in" in url:
 
         print("⚡ USING FAST VBIT EXTRACTOR")
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+            "Connection": "keep-alive",
+        }
 
-        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
 
