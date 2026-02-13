@@ -12,6 +12,8 @@ requests==2.31.0
 beautifulsoup4==4.12.3
 lxml==5.2.1
 readability-lxml==0.8.1
+lxml_html_clean
+
 
 langdetect==1.0.9
 indic-nlp-library==0.92
