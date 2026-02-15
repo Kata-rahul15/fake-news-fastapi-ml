@@ -951,6 +951,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
         else:
             print("📰 ARTICLE PAGE DETECTED → semantic RAG path")
 
+        semantic_score=0
 
         # ------------- fetch -------------
         role_snippets = []
@@ -1123,6 +1124,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
                                     print("🚨 MODEL-5 PROFILE CONTRADICTION — FINAL FAKE")
                                     contradiction_detected = True
                                     if semantic_score >= 0.85 and is_trusted_domain(url):
+                                        print("debug semantic score:", semantic_score)
                                         contradiction_found = True
                                     fake_count += 1
 
