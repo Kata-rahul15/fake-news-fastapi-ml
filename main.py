@@ -927,6 +927,119 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
     print(f"🌐 TOTAL URLS RECEIVED: {len(urls)}")
     print("=====================================================\n")
 
+    # ==========================================================
+    # 🔥 STEP 1: DIRECT WIKIPEDIA CHECK (NATIONALITY ONLY)
+    # ==========================================================
+
+    parsed_subject, _ = cached_claim_parse(claim)
+    attribute_type = detect_attribute_type(claim)
+
+    if attribute_type == "NATIONALITY" and parsed_subject:
+
+        wiki_subject = parsed_subject.strip().replace(" ", "_")
+        wiki_url = f"https://en.wikipedia.org/wiki/{wiki_subject}"
+
+        print("📌 DIRECT WIKI NATIONALITY CHECK:", wiki_url)
+
+        html = cached_fetch_page(wiki_url)
+
+
+        if html:
+            wiki_text = extract_wikipedia_text(html)
+
+            if wiki_text and len(wiki_text.split()) > 20:
+
+                attr_verdict = validate_attribute(claim, wiki_text)
+
+                print("🔎 DIRECT WIKI ATTRIBUTE VERDICT:", attr_verdict)
+                print("🔎 CLAIM NEGATED:", is_negated)
+
+
+                if attr_verdict == "SUPPORTED":
+
+                    if is_negated:
+                        print("🔒 NEGATED CLAIM + WIKI SUPPORT → FINAL FAKE")
+
+                        return {
+                            "status": "CONTRADICTION",
+                            "finalLabel": "FAKE",
+                            "confidencePercent": 97,
+                            "summary": "The claim is negated but Wikipedia confirms the positive fact.",
+                            "aiExplanation": (
+                                "Wikipedia confirms the structured attribute, "
+                                "which directly contradicts the negated claim."
+                            ),
+                            "keywords": keywords,
+                            "evidence": [{
+                                "url": wiki_url,
+                                "snippet": extract_best_evidence_sentence(wiki_text, claim),
+                                "score": 0.98,
+                                "page_type": "ARTICLE"
+                            }]
+                        }
+
+                    else:
+                        print("🔒 WIKIPEDIA SUPPORT → FINAL REAL")
+
+                        return {
+                            "status": "SUPPORTED",
+                            "finalLabel": "REAL",
+                            "confidencePercent": 97,
+                            "summary": "Wikipedia confirms the claim.",
+                            "aiExplanation": "Wikipedia explicitly confirms the structured attribute.",
+                            "keywords": keywords,
+                            "evidence": [{
+                            "url": wiki_url,
+                            "snippet": extract_best_evidence_sentence(wiki_text, claim),
+                            "score": 0.98,
+                            "page_type": "ARTICLE"
+                            }]
+                        }
+
+                if attr_verdict == "CONTRADICTION":
+
+                    if is_negated:
+                        print("🔒 NEGATED CLAIM + WIKI CONTRADICTION → FINAL REAL")
+
+                        return {
+                            "status": "SUPPORTED",
+                            "finalLabel": "REAL",
+                            "confidencePercent": 97,
+                            "summary": "The negated claim aligns with Wikipedia.",
+                            "aiExplanation": (
+                                "Wikipedia contradicts the positive form, "
+                                "which supports the negated claim."
+                            ),
+                            "keywords": keywords,
+                            "evidence": [{
+                                "url": wiki_url,
+                                "snippet": extract_best_evidence_sentence(wiki_text, claim),
+                                "score": 0.98,
+                                "page_type": "ARTICLE"
+                            }]
+                        }
+
+                    else:
+                        print("🔒 WIKIPEDIA CONTRADICTION → FINAL FAKE")
+
+                        return {
+                            "status": "CONTRADICTION",
+                            "finalLabel": "FAKE",
+                            "confidencePercent": 97,
+                            "summary": "Wikipedia contradicts the claim.",
+                            "aiExplanation": "Wikipedia explicitly lists conflicting information.",
+                            "keywords": keywords,
+                            "evidence": [{
+                                "url":wiki_url,
+                                "snippet": extract_best_evidence_sentence(wiki_text, claim),
+                                "score": 0.98,
+                                "page_type": "ARTICLE"
+                            }]
+                        }
+
+        print("⚠️ DIRECT WIKI INCONCLUSIVE → CONTINUE TO SEARCH RAG")
+
+
     # Helper to ensure similarity model loaded once
     def ensure_similarity_model():
         nonlocal similarity_model, claim_emb
@@ -1031,10 +1144,25 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
                         name_match = name_matches(subject, profile_names)
 
                         # ✅ multi-role safe matching
+                        # role_match = any(
+                        #     role_matches_strict(claim_role, r)
+                        #     for r in role_blocks
+                        # )
+                        expanded_roles = []
+
+                        for r in role_blocks:
+                            # Split on common separators
+                            parts = re.split(r"[,&/]| and ", r.lower())
+                            for p in parts:
+                                p = p.strip()
+                                if p:
+                                    expanded_roles.append(p)
+
                         role_match = any(
-                            role_matches_strict(claim_role, r)
-                            for r in role_blocks
+                            role_matches_strict(claim_role, er)
+                            for er in expanded_roles
                         )
+
 
                         print("🧠 MODEL-5 NAME MATCH:", name_match)
                         print("🧠 MODEL-5 ROLE MATCH:", role_match)
@@ -1260,16 +1388,156 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             if profile_authority_state == "CONTRADICTION":
                 print("🛑 SKIPPING ARTICLES — PROFILE ALREADY CONFIRMED FAKE")
                 break
+            # ==========================================================
+            # 🧠 PRE-PARSE CLAIM (ONCE PER URL)
+            # ==========================================================
 
-            # ⚡ WIKI FAST MODE — trim heavy pages
+            parsed_subject, parsed_role = cached_claim_parse(claim)
+            attribute_type = detect_attribute_type(claim)
+
+            print("CLAIM", claim)
+            print("PARSED SUBJECT:", parsed_subject)
+            print("ATTRIBUTE TYPE:", attribute_type)
+
+            # ⚡ WIKIPEDIA EXTRACTION MODE
             if html and "wikipedia.org" in url:
-                print("⚡ WIKI FAST MODE")
-                html = html[:80000]
+                print("⚡ WIKIPEDIA STRUCTURED MODE")
 
-            extracted_text = cached_extract_main_text(html, page_type)
+                extracted_text = extract_wikipedia_text(html)
+
+                print("EXTRACTED WIKI TEXT (first 500 chars):")
+                print(extracted_text[:500])
+
+            else:
+                extracted_text = cached_extract_main_text(html, page_type)
+
+                print("EXTRACTED ARTICLE TEXT (first 500 chars):")
+                print(extracted_text[:500])
+
             if not extracted_text or len(extracted_text.split()) < 6:
                 continue
             text = extracted_text
+
+            # ==========================================================
+            # 🔒 WIKIPEDIA ROLE HARD VALIDATION
+            # ==========================================================
+
+            if "wikipedia.org" in url:
+
+                subject = extract_subject_from_claim(claim)
+                role = extract_role_from_claim(claim)
+                print("SUBJECT:", subject)
+                print(" ROLE:", role) 
+
+                # Ensure role exists (this avoids depending on claim_type)
+                if subject and role:
+
+                    text_l = text.lower()
+                    role_l = role.lower()
+
+                    name_match = name_token_match(subject, text)
+                    role_match = role_l in text_l
+
+
+
+                    print("🔎 WIKI ROLE CHECK → name:", name_match, "role:", role_match)
+                    print("🔎 CLAIM NEGATED:", is_negated)
+
+                    clean_snippet = extract_best_evidence_sentence(text, claim)
+
+                    # ------------------------------------------------------
+                    # CASE 1️⃣ ROLE FOUND IN WIKI
+                    # ------------------------------------------------------
+                    if name_match and role_match:
+
+                        if is_negated:
+                            print("🔒 NEGATED + WIKI ROLE MATCH → FINAL FAKE")
+
+                            return {
+                                "status": "CONTRADICTION",
+                                "finalLabel": "FAKE",
+                                "confidencePercent": 97,
+                                "summary": "Wikipedia confirms the role, contradicting the negated claim.",
+                                "aiExplanation": (
+                                    f"Wikipedia clearly states that {subject} is {role}, "
+                                    "which contradicts the negated claim."
+                                ),
+                                "keywords": keywords,
+                                "evidence": [{
+                                    "url": url,
+                                    "snippet": clean_snippet,
+                                    "score": 0.98,
+                                    "page_type": "ARTICLE"
+                                }]
+                            }
+
+                        else:
+                            print("🔒 WIKI ROLE MATCH → FINAL REAL")
+
+                            return {
+                                "status": "SUPPORTED",
+                                "finalLabel": "REAL",
+                                "confidencePercent": 97,
+                                "summary": "Wikipedia confirms the role.",
+                                "aiExplanation": (
+                                    f"Wikipedia clearly states that {subject} is {role}, "
+                                    "which directly supports the claim."
+                                ),
+                                "keywords": keywords,
+                                "evidence": [{
+                                    "url": url,
+                                    "snippet": clean_snippet,
+                                    "score": 0.98,
+                                    "page_type": "ARTICLE"
+                                }]
+                            }
+
+                    # ------------------------------------------------------
+                    # CASE 2️⃣ ROLE NOT FOUND IN WIKI
+                    # ------------------------------------------------------
+                    if name_match and not role_match:
+
+                        if is_negated:
+                            print("🔒 NEGATED + WIKI ROLE MISMATCH → FINAL REAL")
+
+                            return {
+                                "status": "SUPPORTED",
+                                "finalLabel": "REAL",
+                                "confidencePercent": 96,
+                                "summary": "Wikipedia does not list that role, supporting the negated claim.",
+                                "aiExplanation": (
+                                    f"Wikipedia does not list {role} as a role for {subject}, "
+                                    "which supports the negated claim."
+                                ),
+                                "keywords": keywords,
+                                "evidence": [{
+                                    "url": url,
+                                    "snippet": clean_snippet,
+                                    "score": 0.96,
+                                    "page_type": "ARTICLE"
+                                }]
+                            }
+
+                        else:
+                            print("🔒 WIKI ROLE MISMATCH → FINAL FAKE")
+
+                            return {
+                                "status": "CONTRADICTION",
+                                "finalLabel": "FAKE",
+                                "confidencePercent": 96,
+                                "summary": "Wikipedia contradicts the role.",
+                                "aiExplanation": (
+                                    f"Wikipedia does not list {role} as a role for {subject}, "
+                                    "which contradicts the claim."
+                                ),
+                                "keywords": keywords,
+                                "evidence": [{
+                                    "url": url,
+                                    "snippet": clean_snippet,
+                                    "score": 0.96,
+                                    "page_type": "ARTICLE"
+                                }]
+                            }
 
         # ⚡ TEXT LIGHT MODE — keep only important section
         if len(text.split()) > 600:
@@ -1346,6 +1614,67 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             continue
 
         clean_snippet = extract_best_evidence_sentence(text, claim)
+
+        # STRUCTURED ATTRIBUTE VALIDATION
+        attr_verdict = validate_attribute(claim, text)
+        # if attr_verdict == "CONTRADICTION":
+
+        #     fake_count += 1
+        #     contradiction_found = True
+
+        #     if "wikipedia.org" in url and detect_attribute_type(parsed["attribute"]) == "NATIONALITY":
+        #         print("🔒 WIKIPEDIA NATIONALITY CONTRADICTION — FINAL FAKE")
+
+        #         return {
+        #             "status": "CONTRADICTION",
+        #             "finalLabel": "FAKE",
+        #             "confidencePercent": 97,
+        #             "summary": "Wikipedia contradicts the nationality.",
+        #             "aiExplanation": (
+        #                 "Wikipedia explicitly lists a different nationality "
+        #                 "than what the claim states."
+        #             ),
+        #             "keywords": keywords,
+        #             "evidence": [{
+        #                 "url": url,
+        #                 "snippet": clean_snippet,
+        #                 "score": 0.98,
+        #                 "page_type": page_type
+        #             }]
+        #         }
+
+        #     continue
+
+        # if attr_verdict == "SUPPORTED":
+
+        #     print("✅ ATTRIBUTE SUPPORT DETECTED")
+
+        #     real_count += 1
+        #     support_evidence.append({
+        #         "url": url,
+        #         "snippet": clean_snippet,
+        #         "score": 0.95,
+        #         "page_type": page_type
+        #     })
+
+        #     # 🔒 HARD STOP for Wikipedia on NATIONALITY
+        #     if "wikipedia.org" in url and detect_attribute_type(parsed["attribute"]) == "NATIONALITY":
+        #         print("🔒 WIKIPEDIA NATIONALITY SUPPORT — FINAL REAL")
+
+        #         return {
+        #             "status": "SUPPORTED",
+        #             "finalLabel": "REAL",
+        #             "confidencePercent": 97,
+        #             "summary": "Wikipedia confirms the nationality.",
+        #             "aiExplanation": (
+        #                 "Wikipedia explicitly states the nationality, "
+        #                 "which directly supports the claim."
+        #             ),
+        #             "keywords": keywords,
+        #             "evidence": support_evidence[:1]
+        #         }
+
+        #     continue
 
         # POSITIONAL_ROLE quick checks (unchanged)
         if claim_type == "POSITIONAL_ROLE":
@@ -2269,6 +2598,10 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
             "evidence": neutral_evidence[:2]
         }
+    print("REAL COUNT", real_count)
+    print("FAKE COUNT", fake_count)
+    print("CONTRADICTION FOUND", contradiction_found)
+
     print("\n================= 🧾 RAG TRACE END =================")
     print("====================================================\n")
 
@@ -3651,6 +3984,48 @@ def remove_citation_markers(text: str) -> str:
 
     return text.strip()
 
+from bs4 import BeautifulSoup
+import re
+
+
+def extract_wikipedia_text(html: str, max_paragraphs: int = 5) -> str:
+    
+
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Main article container
+    content = soup.find("div", id="mw-content-text")
+    if not content:
+        return ""
+
+    paragraphs = content.find_all("p", recursive=True)
+
+    clean_paragraphs = []
+
+    for p in paragraphs:
+        text = p.get_text(" ", strip=True)
+
+        # Remove citation markers like [1], [23]
+        text = re.sub(r"\[\d+\]", "", text)
+
+        # Remove excessive whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Skip very short paragraphs
+        if len(text.split()) < 20:
+            continue
+
+        clean_paragraphs.append(text)
+
+        # Stop after N good paragraphs
+        if len(clean_paragraphs) >= max_paragraphs:
+            break
+
+    return " ".join(clean_paragraphs)
+
 # =====================================================
 # Sentence Extraction (Industry Standard)
 # =====================================================
@@ -4023,6 +4398,188 @@ def build_search_query(claim: str) -> str:
         return claim.lower()
 
     return " ".join(kept[:20])
+
+COUNTRY_DEMONYM_MAP = {
+    "india": "indian",
+    "united states": "american",
+    "america": "american",
+    "canada": "canadian",
+    "south africa": "south african",
+    "united kingdom": "british",
+    "uk": "british",
+    "china": "chinese",
+    "france": "french",
+    "germany": "german",
+    "italy": "italian",
+    "spain": "spanish",
+    "japan": "japanese",
+    "australia": "australian",
+    "russia": "russian",
+    "brazil": "brazilian",
+    "mexico": "mexican",
+}
+
+def validate_attribute(claim, evidence_text):
+    parsed = parse_attribute_claim(claim)
+    if not parsed:
+        return None
+
+    subject = parsed["subject"]
+    attribute = parsed["attribute"]
+
+    attr_type = detect_attribute_type(attribute)
+    print("CLAIM", claim)
+    print("PARSED CLAIM", parsed)
+    print("ATTRIBUTE TYPE", attr_type)
+
+    if not attr_type:
+        return None
+
+    # ------------------------------
+    # NATIONALITY VALIDATION
+    # ------------------------------
+    if attr_type == "NATIONALITY":
+        claim_nats = extract_nationalities(attribute)
+        evidence_nats = extract_nationalities(evidence_text)
+        print("CLAIM NATIONALITIES", claim_nats)
+        print("EVIDENCE NATIONALITIES", evidence_nats)
+
+        if not claim_nats:
+            return None
+
+        if claim_nats.intersection(evidence_nats):
+            return "SUPPORTED"
+        else:
+            return "CONTRADICTION"
+
+    # ------------------------------
+    # ROLE VALIDATION
+    # ------------------------------
+    if attr_type == "ROLE":
+        attr_l = attribute.lower()
+        print("ROLE CLAIM", attribute)
+        print("ROLE FOUND IN EVIDENCE", attribute.lower() in evidence_text.lower())
+
+        if attr_l in evidence_text.lower():
+            return "SUPPORTED"
+        else:
+            return "CONTRADICTION"
+
+    # ------------------------------
+    # DATE VALIDATION
+    # ------------------------------
+    if attr_type == "DATE":
+        claim_years = extract_years(attribute)
+        evidence_years = extract_years(evidence_text)
+        print("CLAIM YEARS", claim_years)
+        print("EVIDENCE YEARS", evidence_years)
+
+        if claim_years.intersection(evidence_years):
+            return "SUPPORTED"
+        else:
+            return "CONTRADICTION"
+
+    return None
+
+
+
+def extract_nationalities(text: str):
+    """
+    Extracts nationality information from text in a robust way.
+    Returns a set of normalized nationality strings.
+    """
+
+    if not text:
+        return set()
+
+    text_lower = text.lower()
+    found = set()
+
+    # 1️⃣ Direct demonym detection (e.g., "American", "Indian")
+    for country, demonym in COUNTRY_DEMONYM_MAP.items():
+        if re.search(rf"\b{re.escape(demonym)}\b", text_lower):
+            found.add(demonym)
+
+    # 2️⃣ "Citizen of X"
+    for country, demonym in COUNTRY_DEMONYM_MAP.items():
+        if re.search(rf"\bcitizen\s+of\s+{re.escape(country)}\b", text_lower):
+            found.add(demonym)
+
+    # 3️⃣ "Born in X"
+    for country, demonym in COUNTRY_DEMONYM_MAP.items():
+        if re.search(rf"\bborn\s+in\s+{re.escape(country)}\b", text_lower):
+            found.add(demonym)
+
+    # 4️⃣ "From X"
+    for country, demonym in COUNTRY_DEMONYM_MAP.items():
+        if re.search(rf"\bfrom\s+{re.escape(country)}\b", text_lower):
+            found.add(demonym)
+
+    # 5️⃣ Handle compound demonyms like "South African-born American"
+    for country, demonym in COUNTRY_DEMONYM_MAP.items():
+        if demonym in text_lower:
+            found.add(demonym)
+
+
+
+    return found
+
+
+
+ATTRIBUTE_TYPES = {
+    "NATIONALITY",
+    "LOCATION",
+    "ROLE",
+    "DATE",
+    "NUMERIC",
+    "ORGANIZATION"
+}
+def parse_attribute_claim(claim: str):
+    """
+    Parses simple structured claims:
+    SUBJECT is ATTRIBUTE
+    SUBJECT was ATTRIBUTE
+    """
+
+    if not claim:
+        return None
+
+    match = re.split(r"\s+(is|was|are|were)\s+", claim, flags=re.I)
+    if len(match) < 3:
+        return None
+
+    subject = match[0].strip()
+    attribute = match[2].strip()
+
+    return {
+        "subject": subject,
+        "attribute": attribute
+    }
+
+def detect_attribute_type(attribute: str):
+    attr_l = attribute.lower()
+
+    # 1️⃣ Nationality
+    if extract_nationalities(attribute):
+        return "NATIONALITY"
+
+    # 2️⃣ Geography
+    if attr_l in COUNTRY_REGION_MAP.values():
+        return "LOCATION"
+
+    # 3️⃣ Role
+    if any(role in attr_l for role in ROLE_WORDS):
+        return "ROLE"
+
+    # 4️⃣ Date
+    if re.search(r"\b(18|19|20)\d{2}\b", attr_l):
+        return "DATE"
+
+    # 5️⃣ Numeric
+    if re.search(r"\b\d+\b", attr_l):
+        return "NUMERIC"
+
+    return None
 
 
 def is_reported_fact(sentence: str) -> bool:
@@ -4745,6 +5302,14 @@ def verify_claim_with_rag(claim: str, detected_lang: str) -> tuple[bool, list[di
     print("#===========================================")
     print("✅ URLs after CAR  filtering:", urls)
     print("#===========================================")
+
+    wiki_urls = [u for u in urls if "wikipedia.org" in u]
+
+    if wiki_urls:
+        print("📌 WIKI FOUND IN CAR → PRIORITIZING")
+        non_wiki_urls = [u for u in urls if "wikipedia.org" not in u]
+        urls = wiki_urls + non_wiki_urls
+
     rag_result = universal_rag_retrieve(
         rag_input,
         urls,
@@ -5079,35 +5644,84 @@ def extract_role_from_claim(claim: str) -> str | None:
     if not claim:
         return None
 
-    claim_l = claim.lower()
+    claim_l = claim.lower().strip()
 
     # --------------------------------------------------
-    # 1️⃣ Build dynamic role list from ROLE_WORDS
+    # 0️⃣ Neutralize negation only for detection
+    # --------------------------------------------------
+    normalized_claim = re.sub(
+        r"\b(is|was|are|were)\s+not\b",
+        r"\1",
+        claim_l
+    )
+
+    # --------------------------------------------------
+    # 1️⃣ Match roles using WORD BOUNDARIES
     # --------------------------------------------------
     role_candidates = []
 
     for r in ROLE_WORDS:
-        if r in claim_l:
+        pattern = r"\b" + re.escape(r.lower()) + r"\b"
+        if re.search(pattern, normalized_claim):
             role_candidates.append(r)
 
     # --------------------------------------------------
     # 2️⃣ Longest phrase wins
-    # Prevents:
-    # assistant professor -> professor collapse
     # --------------------------------------------------
     if role_candidates:
         role_candidates.sort(key=len, reverse=True)
         return role_candidates[0]
 
     # --------------------------------------------------
-    # 3️⃣ Fallback using generic role extractor
-    # (already in your code)
+    # 3️⃣ Fallback generic extractor
     # --------------------------------------------------
-    generic = extract_generic_role_from_claim(claim)
+    generic = extract_generic_role_from_claim(normalized_claim)
     if generic:
         return generic
 
     return None
+
+# def extract_role_from_claim(claim: str) -> str | None:
+
+#     if not claim:
+#         return None
+
+#     claim_l = claim.lower()
+
+#     # --------------------------------------------------
+#     # 0️⃣ Create a negation-neutral version ONLY for detection
+#     # --------------------------------------------------
+#     normalized_claim = re.sub(
+#         r"\b(is|was|are|were)\s+not\b",
+#         r"\1",
+#         claim_l
+#     )
+
+#     # --------------------------------------------------
+#     # 1️⃣ Build dynamic role list from ROLE_WORDS
+#     # Try BOTH original and normalized text
+#     # --------------------------------------------------
+#     role_candidates = []
+
+#     for r in ROLE_WORDS:
+#         if r in claim_l or r in normalized_claim:
+#             role_candidates.append(r)
+
+#     # --------------------------------------------------
+#     # 2️⃣ Longest phrase wins
+#     # --------------------------------------------------
+#     if role_candidates:
+#         role_candidates.sort(key=len, reverse=True)
+#         return role_candidates[0]
+
+#     # --------------------------------------------------
+#     # 3️⃣ Fallback using generic role extractor
+#     # --------------------------------------------------
+#     generic = extract_generic_role_from_claim(claim_l)
+#     if generic:
+#         return generic
+
+#     return None
 
 
 COMMON_ENGLISH_WORDS = {
