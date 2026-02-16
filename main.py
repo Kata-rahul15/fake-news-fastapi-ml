@@ -221,6 +221,7 @@ def cached_sentences(text: str):
 
 @lru_cache(maxsize=512)
 def cached_claim_parse(claim: str):
+    print("IN CACHE FUNCTION")
     return (
         extract_subject_from_claim(claim),
         extract_role_from_claim(claim)
@@ -848,6 +849,306 @@ def is_boilerplate(text: str) -> bool:
     hits = sum(1 for p in BOILERPLATE_PHRASES if p in t)
     return hits >= 2
 
+def verify_role(claim_role: str | None,
+                evidence_text: str | None,
+                evidence_roles: list[str] | None = None) -> dict:
+    """
+    Unified role verification entry point.
+
+    Returns:
+        {
+            "status": "SUPPORTED" | "MISMATCH" | "NEUTRAL",
+            "confidence": float,            # 0.0 - 1.0
+            "matched_role": str | None,     # the evidence role that matched (if any)
+            "reason": str
+        }
+
+    Behavior:
+    - Does NOT handle negation, final verdict, embeddings, or semantics.
+    - Null-safe: never raises, returns NEUTRAL on error or missing inputs.
+    - Integrates existing helpers when available:
+        normalize_role(), role_matches_strict(), is_broader_role(),
+        ROLE_ONTOLOGY, ROLE_RANKS, ROLE_WORDS
+    """
+    print("\n🧠 [VERIFY_ROLE]")
+    print("   claim_role:", claim_role)
+    print("   evidence_roles:", evidence_roles)
+
+    try:
+        # -----------------------
+        # 1) Null / quick guard
+        # -----------------------
+        if not claim_role or (not evidence_text and not evidence_roles):
+            return {
+                "status": "NEUTRAL",
+                "confidence": 0.0,
+                "matched_role": None,
+                "reason": "No claim role or evidence provided"
+            }
+
+        # -----------------------
+        # 2) helpers / fallbacks
+        # -----------------------
+        # use global helpers if present, otherwise provide minimal fallbacks
+        normalize = globals().get("normalize_role")
+        role_matches_strict_fn = globals().get("role_matches_strict")
+        is_broader_role_fn = globals().get("is_broader_role")
+        ROLE_ONTOLOGY_G = globals().get("ROLE_ONTOLOGY", {})
+        ROLE_RANKS_G = globals().get("ROLE_RANKS", {})
+        ROLE_WORDS_G = globals().get("ROLE_WORDS", [])
+
+        def _normalize_local(r: str | None) -> str:
+            if not r:
+                return ""
+            try:
+                if normalize:
+                    nr = normalize(r)
+                    if isinstance(nr, str) and nr:
+                        return nr.lower().strip()
+            except Exception:
+                pass
+            # lightweight fallback normalization
+            r2 = re.sub(r"[^a-zA-Z0-9\s-]", " ", r).lower()
+            r2 = re.sub(r"\b(a|an|the)\b", " ", r2)
+            r2 = re.sub(r"\s+", " ", r2).strip()
+            return r2
+
+        # modifiers to strip (extend if needed)
+        DEFAULT_MODIFIERS = {
+            "indian", "telugu", "hindi", "film", "movie", "bollywood", "tollywood",
+            "former", "ex", "ex-", "senior", "junior", "assistant", "associate"
+        }
+
+        # canonical mapping (safe local map; global override allowed)
+        ROLE_CANONICAL_MAP = globals().get("ROLE_CANONICAL_MAP", {
+            "film actor": "actor",
+            "movie actor": "actor",
+            "telugu actor": "actor",
+            "bollywood actor": "actor",
+            "tollywood actor": "actor",
+            "chief executive officer": "ceo",
+            "ceo": "ceo",
+            "software developer": "software engineer",
+            "professor": "professor",
+        })
+
+        def _remove_modifiers_and_canonicalize(role: str) -> str:
+            r = _normalize_local(role)
+            if not r:
+                return ""
+            # remove common modifiers
+            tokens = [t for t in r.split() if t not in DEFAULT_MODIFIERS]
+            cleaned = " ".join(tokens).strip()
+            # apply canonical map longest-first
+            if cleaned in ROLE_CANONICAL_MAP:
+                return ROLE_CANONICAL_MAP[cleaned]
+            # try phrase-level canonical mapping (two-token phrases)
+            for k, v in ROLE_CANONICAL_MAP.items():
+                if k in cleaned:
+                    return v
+            return cleaned
+
+        # -----------------------
+        # 3) prepare claim role
+        # -----------------------
+        claim_role_norm = _remove_modifiers_and_canonicalize(claim_role)
+        if not claim_role_norm:
+            return {
+                "status": "NEUTRAL",
+                "confidence": 0.0,
+                "matched_role": None,
+                "reason": "Claim role could not be normalized"
+            }
+
+        # -----------------------
+        # 4) prepare evidence roles list
+        # -----------------------
+        evidence_candidates = []
+
+        # use provided evidence_roles first (if any)
+        if evidence_roles:
+            for r in evidence_roles:
+                rn = _remove_modifiers_and_canonicalize(r)
+                if rn:
+                    evidence_candidates.append(rn)
+
+        # if none provided or still empty, extract from evidence_text using ROLE_WORDS
+        if not evidence_candidates and evidence_text:
+            text_l = evidence_text.lower()
+            role_words = ROLE_WORDS_G if ROLE_WORDS_G else []
+            found = set()
+
+            # --- Canonical phrases (word boundary safe) ---
+            for phrase in sorted(list(ROLE_CANONICAL_MAP.keys()), key=lambda x: -len(x)):
+                pattern = r"\b" + re.escape(phrase.lower()) + r"\b"
+                if re.search(pattern, text_l):
+                    found.add(ROLE_CANONICAL_MAP[phrase])
+
+            # --- ROLE_WORDS (word boundary safe) ---
+            for rw in role_words:
+                pattern = r"\b" + re.escape(rw.lower()) + r"\b"
+                if re.search(pattern, text_l):
+                    fr = _remove_modifiers_and_canonicalize(rw)
+                    if fr:
+                        found.add(fr)
+
+            # --- Verb-based extraction ---
+            try:
+                for m in re.finditer(
+                    r"\b(?:is|was|serves as|works as|appointed as)\s+(?:a|an|the)?\s*([a-zA-Z\s-]{3,40})",
+                    evidence_text,
+                    flags=re.IGNORECASE
+                ):
+                    candidate = m.group(1).strip().lower()
+                    candidate = re.sub(r"[^a-z0-9\s-]", " ", candidate)
+                    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+                    if len(candidate.split()) <= 5:
+                        fr = _remove_modifiers_and_canonicalize(candidate)
+                        if fr:
+                            found.add(fr)
+            except Exception:
+                pass
+
+            evidence_candidates = list(found)
+
+        print("🔎 Evidence roles detected:", evidence_candidates)
+
+        # final dedupe & fallback
+        evidence_candidates = [e for i, e in enumerate(evidence_candidates) if e and (e not in evidence_candidates[:i])]
+        if not evidence_candidates:
+            # no explicit evidence roles found — be neutral
+            return {
+                "status": "NEUTRAL",
+                "confidence": 0.0,
+                "matched_role": None,
+                "reason": "No evidence roles detected"
+            }
+
+        # -----------------------
+        # 5) evaluation loop — prioritized checks
+        # -----------------------
+        # Priority: strict authority mismatch -> exact match -> ontology -> broader -> token overlap -> neutral
+        best_match = None
+
+        for ev_role in evidence_candidates:
+            print("   Checking evidence role:", ev_role)
+
+            # 5.a strict authority matching if both roles are ranked
+            try:
+                if ROLE_RANKS_G and claim_role_norm in ROLE_RANKS_G and ev_role in ROLE_RANKS_G and role_matches_strict_fn:
+                    try:
+                        strict_ok = bool(role_matches_strict_fn(claim_role_norm, ev_role))
+                    except Exception:
+                        strict_ok = False
+                    # if strict returns False but ranks differ, treat as hierarchy mismatch
+                    if not strict_ok:
+                        
+                        # strong contradiction when both are ranked but strict check fails
+                        return {
+                            "status": "MISMATCH",
+                            "confidence": 0.90,
+                            "matched_role": ev_role,
+                            "reason": f"Authority/hierarchy mismatch between claim role '{claim_role_norm}' and evidence role '{ev_role}'"
+                        }
+            except Exception:
+                # don't crash; continue to other checks
+                pass
+
+            # 5.b exact canonical match
+            if claim_role_norm == ev_role:
+                return {
+                    "status": "SUPPORTED",
+                    "confidence": 0.95,
+                    "matched_role": ev_role,
+                    "reason": "Exact canonical role match"
+                }
+
+            # 5.c ontology support (claim -> evidence or evidence -> claim)
+            try:
+                # ROLE_ONTOLOGY may map broader->narrower or synonym relations
+                if ROLE_ONTOLOGY_G:
+                    # if claim is broader and evidence is in its children
+                    children = ROLE_ONTOLOGY_G.get(claim_role_norm, []) or []
+                    parents = [k for k, v in ROLE_ONTOLOGY_G.items() if ev_role in (v or [])]
+                    if ev_role in children or claim_role_norm in (ROLE_ONTOLOGY_G.get(ev_role, []) or []):
+                        return {
+                            "status": "SUPPORTED",
+                            "confidence": 0.85,
+                            "matched_role": ev_role,
+                            "reason": "Ontology relation supports the claim role"
+                        }
+                    if parents:
+                        return {
+                            "status": "SUPPORTED",
+                            "confidence": 0.85,
+                            "matched_role": ev_role,
+                            "reason": "Ontology parent-child relationship supports the claim role"
+                        }
+            except Exception:
+                pass
+
+            # 5.d broader / narrower role check via helper
+            try:
+                if is_broader_role_fn and is_broader_role_fn(claim_role_norm, ev_role):
+                    return {
+                        "status": "SUPPORTED",
+                        "confidence": 0.75,
+                        "matched_role": ev_role,
+                        "reason": "Claim role is broader and evidence role falls under it"
+                    }
+                if is_broader_role_fn and is_broader_role_fn(ev_role, claim_role_norm):
+                    return {
+                        "status": "SUPPORTED",
+                        "confidence": 0.75,
+                        "matched_role": ev_role,
+                        "reason": "Evidence role is broader and subsumes the claim role"
+                    }
+            except Exception:
+                pass
+
+            # 5.e token-overlap fallback
+            try:
+                claim_tokens = [t for t in claim_role_norm.split() if len(t) > 1]
+                ev_tokens = [t for t in ev_role.split() if len(t) > 1]
+                if claim_tokens and ev_tokens:
+                    overlap = len(set(claim_tokens) & set(ev_tokens))
+                    # threshold: at least half of claim tokens overlap (or at least 1)
+                    threshold = max(1, len(claim_tokens) // 2)
+                    if overlap >= threshold:
+                        return {
+                            "status": "SUPPORTED",
+                            "confidence": 0.60,
+                            "matched_role": ev_role,
+                            "reason": f"Token overlap ({overlap}/{len(claim_tokens)}) between claim and evidence role"
+                        }
+            except Exception:
+                pass
+
+            # keep track of a candidate for a possible weaker return (not strictly necessary)
+            if not best_match:
+                best_match = ev_role
+        print("   Returning:", status, confidence)
+
+        # -----------------------
+        # 6) nothing decisive found -> NEUTRAL
+        # -----------------------
+        return {
+            "status": "NEUTRAL",
+            "confidence": 0.30,
+            "matched_role": best_match,
+            "reason": "No strong role alignment found"
+        }
+
+    except Exception as e:
+        # catastrophic fallback — never raise
+        return {
+            "status": "NEUTRAL",
+            "confidence": 0.0,
+            "matched_role": None,
+            "reason": f"Internal error in verify_role: {str(e)}"
+        }
+
 
 def extract_subject_from_claim(claim: str) -> str | None:
     """
@@ -906,8 +1207,6 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
     if claim_type == "IDENTITY_ROLE":
         MIN_SUPPORT_SOURCES = 1
         print("🧠 IDENTITY CLAIM — SINGLE SOURCE MODE ENABLED")
-
-    role = extract_role_from_claim(claim) or ""
 
     # negation detection (reuse your existing helper for safety)
     is_negated = is_negated_claim(claim)
@@ -1354,9 +1653,8 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
             # PROFILE -> semantic support (collect evidence) then continue
             if identity_text and claim_type == "IDENTITY_ROLE" and not _is_negated:
-                subject = extract_subject_from_claim(claim)
-                print("DEBUG SUBJECT:", subject)
-                role = extract_role_from_claim(claim)
+                subject , role =cached_claim_parse(claim)
+                print("Using cache in 1656")
                 entity_ok = subject and subject_supported_by_text(subject, identity_text)
                 role_ok = role and role_supported_by_text(role, identity_text)
                 if entity_ok and role_ok:
@@ -1423,9 +1721,8 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
             # ==========================================================
 
             if "wikipedia.org" in url:
-
-                subject = extract_subject_from_claim(claim)
-                role = extract_role_from_claim(claim)
+                subject , role = cached_claim_parse(claim)
+                print("using cached function in 1724")
                 print("SUBJECT:", subject)
                 print(" ROLE:", role) 
 
@@ -1436,7 +1733,15 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
                     role_l = role.lower()
 
                     name_match = name_token_match(subject, text)
-                    role_match = role_l in text_l
+                    role_result = verify_role(role, text)
+
+                    if role_result["status"] == "SUPPORTED":
+                        role_match = True
+                    elif role_result["status"] == "MISMATCH":
+                        role_match = False
+                    else:
+                        role_match = False
+
 
 
 
@@ -1918,9 +2223,19 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
         # Role/predicate sanity for identity claims
         subject_ok = extract_subject_from_claim(claim)
+
         role_ok = True
+        role_result = None
+
         if claim_type == "IDENTITY_ROLE":
-            role_ok = role.lower() in text.lower()
+            role_result = verify_role(role, text)
+            print("role result new feature",role_result)
+
+            # Only block if there is a strict mismatch
+            if role_result["status"] == "MISMATCH":
+                role_ok = False
+            else:
+                role_ok = True
 
         # Support candidate
         SUPPORT_THRESHOLD = 0.7
@@ -4156,6 +4471,88 @@ def is_absurd_role(role: str) -> bool:
     role_l = role.lower()
     return any(a in role_l for a in ABSURD_ROLES)
 
+
+
+ABSURD_KEYWORDS = {
+    "alien", "ghost", "zombie", "dragon", "demon", "god",
+    "superman", "vampire", "wizard", "immortal",
+    "from mars", "from jupiter", "time traveler"
+}
+
+VAGUE_PATTERNS = [
+    r"\bmaybe\b",
+    r"\bperhaps\b",
+    r"\bpossibly\b",
+    r"\bi think\b",
+    r"\bsome people say\b",
+    r"\bit is believed\b",
+]
+
+FACTUAL_VERBS = {"is", "was", "are", "were", "has", "have", "had"}
+
+
+def is_absurd_or_vague_claim(claim: str) -> bool:
+    """
+    Returns True if claim is:
+    - structurally broken
+    - vague / speculative
+    - ontologically absurd
+    """
+
+    if not claim:
+        return True
+
+    c = claim.lower().strip()
+
+    # --------------------------------------------------
+    # 1️⃣ Junk / broken structure
+    # --------------------------------------------------
+    tokens = c.split()
+    if len(tokens) < 2:
+        return True
+
+    # Must contain at least one factual verb
+    if not any(verb in tokens for verb in FACTUAL_VERBS):
+        return True
+
+    # --------------------------------------------------
+    # 2️⃣ Vague / speculative language
+    # --------------------------------------------------
+    for pattern in VAGUE_PATTERNS:
+        if re.search(pattern, c):
+            return True
+
+    # --------------------------------------------------
+    # 3️⃣ Ontological absurdity (fantasy roles etc.)
+    # --------------------------------------------------
+    for keyword in ABSURD_KEYWORDS:
+        if keyword in c:
+            return True
+
+    # --------------------------------------------------
+    # 4️⃣ Identity role plausibility check
+    # --------------------------------------------------
+    print("Using cache function in absurd")
+    parsed = cached_claim_parse(claim)
+    role = None
+    if parsed and isinstance(parsed, tuple) and len(parsed) >= 2:
+        role = parsed[1]
+
+    if role:
+        role_l = role.lower().strip()
+
+        # If role is clearly fantasy (single word match)
+        if role_l in ABSURD_KEYWORDS:
+            return True
+
+        # If role contains impossible entity (e.g. "alien king")
+        for keyword in ABSURD_KEYWORDS:
+            if keyword in role_l:
+                return True
+
+    return False
+
+
 def is_impossible_claim(text: str) -> bool:
     t = normalize_indic_text(text, safe_language_detect(text)).lower()
 
@@ -5639,89 +6036,147 @@ def extract_roles_from_text(html: str):
 
     return roles
 
+
 def extract_role_from_claim(claim: str) -> str | None:
+    print("\n🧪 [ROLE EXTRACT] RAW CLAIM:", claim)
 
     if not claim:
+        print("❌ Claim is empty")
         return None
 
     claim_l = claim.lower().strip()
+    print("🔹 Normalized claim:", claim_l)
 
     # --------------------------------------------------
-    # 0️⃣ Neutralize negation only for detection
+    # 0) Negation neutralization (extraction only)
     # --------------------------------------------------
-    normalized_claim = re.sub(
-        r"\b(is|was|are|were)\s+not\b",
-        r"\1",
-        claim_l
+    normalized_claim = re.sub(r"\b(is|was|are|were)\s+not\b", r"\1", claim_l)
+    print("🔹 Negation-neutral claim:", normalized_claim)
+
+    claim_clean = re.sub(r"[^\w\s-]", " ", normalized_claim)
+    claim_clean = re.sub(r"\s+", " ", claim_clean).strip()
+    print("🔹 Cleaned claim:", claim_clean)
+
+    ROLE_WORDS_G = globals().get("ROLE_WORDS", [])
+    print("🔹 ROLE_WORDS count:", len(ROLE_WORDS_G))
+
+    # --------------------------------------------------
+    # 1) Exact word-boundary ROLE_WORD match
+    # --------------------------------------------------
+    if ROLE_WORDS_G:
+        role_candidates = []
+        for r in ROLE_WORDS_G:
+            pattern = r"\b" + re.escape(r.lower()) + r"\b"
+            if re.search(pattern, claim_clean):
+                print("✅ Boundary match found:", r)
+                role_candidates.append(r)
+
+        if role_candidates:
+            role_candidates.sort(key=len, reverse=True)
+            selected = role_candidates[0].lower()
+            print("🏆 Selected (longest boundary match):", selected)
+            print("🎯 RETURNING (boundary):", selected)
+            return selected
+
+    # --------------------------------------------------
+    # 2) Pattern-based extraction
+    # --------------------------------------------------
+    patterns = [
+        r"\bis\s+(?:a|an|the)?\s*(.+)$",
+        r"\bwas\s+(?:a|an|the)?\s*(.+)$",
+        r"\bare\s+(?:a|an|the)?\s*(.+)$",
+        r"\bserves\s+as\s+(?:a|an|the)?\s*(.+)$",
+        r"\bworks\s+as\s+(?:a|an|the)?\s*(.+)$",
+        r"\bworked\s+as\s+(?:a|an|the)?\s*(.+)$",
+        r"\bappointed\s+as\s+(?:a|an|the)?\s*(.+)$",
+        r"\bbecame\s+(?:a|an|the)?\s*(.+)$",
+        r"\bserving\s+as\s+(?:a|an|the)?\s*(.+)$",
+    ]
+
+    STOP_PREPS_RE = re.compile(
+        r"\b(of|in|at|for|from|since|with|who|which|that|on)\b",
+        re.IGNORECASE
     )
 
-    # --------------------------------------------------
-    # 1️⃣ Match roles using WORD BOUNDARIES
-    # --------------------------------------------------
-    role_candidates = []
+    for patt in patterns:
+        m = re.search(patt, claim_clean, flags=re.IGNORECASE)
+        if not m:
+            continue
 
-    for r in ROLE_WORDS:
-        pattern = r"\b" + re.escape(r.lower()) + r"\b"
-        if re.search(pattern, normalized_claim):
-            role_candidates.append(r)
+        role_part = m.group(1).strip()
+        print("🔎 Pattern matched role_part:", role_part)
+
+        role_part = re.split(STOP_PREPS_RE, role_part)[0].strip()
+        role_part = re.sub(r"^(a|an|the)\s+", "", role_part).strip()
+        role_part = re.sub(r"\s+", " ", role_part).strip()
+
+        print("🔎 Cleaned role_part:", role_part)
+
+        if len(role_part.split()) > 6:
+            print("⚠️ role_part too long, checking boundary inside...")
+            for rw in sorted(ROLE_WORDS_G, key=len, reverse=True):
+                pattern = r"\b" + re.escape(rw.lower()) + r"\b"
+                if re.search(pattern, role_part):
+                    print("🎯 RETURNING (long role boundary):", rw.lower())
+                    return rw.lower()
+            continue
+
+        # IMPORTANT FIX: use word boundary, NOT substring
+        found_inside = []
+        for rw in ROLE_WORDS_G:
+            pattern = r"\b" + re.escape(rw.lower()) + r"\b"
+            if re.search(pattern, role_part):
+                print("✅ Boundary inside role_part:", rw)
+                found_inside.append(rw)
+
+        if found_inside:
+            found_inside.sort(key=len, reverse=True)
+            selected = found_inside[0].lower()
+            print("🎯 RETURNING (inside boundary):", selected)
+            return selected
+
+        if role_part:
+            print("🎯 RETURNING (raw role_part):", role_part.lower())
+            return role_part.lower()
 
     # --------------------------------------------------
-    # 2️⃣ Longest phrase wins
+    # 3) Generic fallback
     # --------------------------------------------------
-    if role_candidates:
-        role_candidates.sort(key=len, reverse=True)
-        return role_candidates[0]
+    try:
+        generic = extract_generic_role_from_claim(claim_clean)
+        if generic:
+            print("🎯 RETURNING (generic fallback):", generic.lower())
+            return generic.lower()
+    except Exception as e:
+        print("⚠️ Generic fallback error:", e)
 
     # --------------------------------------------------
-    # 3️⃣ Fallback generic extractor
+    # 4) Safe boundary fallback
     # --------------------------------------------------
-    generic = extract_generic_role_from_claim(normalized_claim)
-    if generic:
-        return generic
+    for rw in sorted(ROLE_WORDS_G, key=len, reverse=True):
+        pattern = r"\b" + re.escape(rw.lower()) + r"\b"
+        if re.search(pattern, claim_clean):
+            print("🎯 RETURNING (final boundary fallback):", rw.lower())
+            return rw.lower()
 
+    # --------------------------------------------------
+    # 5) Fuzzy fallback
+    # --------------------------------------------------
+    try:
+        words = [w for w in re.split(r"\s+", claim_clean) if w and len(w) > 2]
+        pool = [r.lower() for r in ROLE_WORDS_G]
+
+        for w in words:
+            matches = get_close_matches(w, pool, n=1, cutoff=0.85)
+            if matches:
+                print("🎯 RETURNING (fuzzy match):", matches[0])
+                return matches[0]
+    except Exception as e:
+        print("⚠️ Fuzzy fallback error:", e)
+
+    print("❌ No role found")
     return None
 
-# def extract_role_from_claim(claim: str) -> str | None:
-
-#     if not claim:
-#         return None
-
-#     claim_l = claim.lower()
-
-#     # --------------------------------------------------
-#     # 0️⃣ Create a negation-neutral version ONLY for detection
-#     # --------------------------------------------------
-#     normalized_claim = re.sub(
-#         r"\b(is|was|are|were)\s+not\b",
-#         r"\1",
-#         claim_l
-#     )
-
-#     # --------------------------------------------------
-#     # 1️⃣ Build dynamic role list from ROLE_WORDS
-#     # Try BOTH original and normalized text
-#     # --------------------------------------------------
-#     role_candidates = []
-
-#     for r in ROLE_WORDS:
-#         if r in claim_l or r in normalized_claim:
-#             role_candidates.append(r)
-
-#     # --------------------------------------------------
-#     # 2️⃣ Longest phrase wins
-#     # --------------------------------------------------
-#     if role_candidates:
-#         role_candidates.sort(key=len, reverse=True)
-#         return role_candidates[0]
-
-#     # --------------------------------------------------
-#     # 3️⃣ Fallback using generic role extractor
-#     # --------------------------------------------------
-#     generic = extract_generic_role_from_claim(claim_l)
-#     if generic:
-#         return generic
-
-#     return None
 
 
 COMMON_ENGLISH_WORDS = {
@@ -7487,14 +7942,35 @@ def predict_text(data: InputText):
 
 
     MAX_CLAIMS_TO_VERIFY = 3
+    print("🧠 CLAIMS EXTRACTED:", claims)
+    print("🔥 ENTERING CLAIM LOOP BLOCK")
 
     for c in claims[:MAX_CLAIMS_TO_VERIFY]:
 
-        if is_url_junk_sentence(c):
-            continue
+        print("🔥 ENTERED THE  CLAIM LOOP BLOCK")
+        subject = extract_subject_from_claim(c)
+        print("🔎 SUBJECT CHECK:", subject)
 
-        if len(c.split()) < 4 and not extract_specific_entity(c):
+        if not subject:
+            print("⛔ SKIPPING — NO SUBJECT")
             continue
+        print("AFTER SUBJECT")
+
+        if is_absurd_or_vague_claim(c):
+            return build_ui_response({
+                "finalLabel": "FAKE",
+                "confidencePercent": 95,
+                "summary": "The claim contains an implausible or logically impossible assertion.",
+                "aiExplanation": "The claim was rejected before retrieval because it violates basic plausibility or contains an impossible role or entity.",
+                "keywords": keywords,
+                "language": language_name,
+                "sentiment": sentiment,
+                "factCheckUsed": False,
+                "factCheckSource": None,
+                "verificationMethod": "PLAUSIBILITY_FILTER",
+                "evidence": []
+            })
+
 
         result = verify_claim_with_rag(c, detected_lang)
 
