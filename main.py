@@ -844,6 +844,77 @@ BOILERPLATE_PHRASES = [
     "patents"
 ]
 
+TIME_SENSITIVE_ROLES = [
+    "chief minister",
+    "prime minister",
+    "president",
+    "governor",
+    "mayor",
+    "minister",
+    "ceo"
+]
+
+CURRENT_POSITIVE_PATTERNS = [
+    " is ",
+    " currently ",
+    " currently serves as ",
+    " is the current ",
+    " serves as "
+]
+
+FORMER_GUARD_TERMS = [
+    "former",
+    "ex-",
+    "previous",
+    "was ",
+    "served as",
+    "had been",
+    "first chief minister",
+    "tenure",
+    "served for"
+]
+
+def validate_current_role(subject: str, role: str, text: str) -> dict:
+    """
+    Strict validation for time-sensitive political roles.
+    """
+
+    text_l = text.lower()
+    subject_l = subject.lower()
+    role_l = role.lower()
+
+    name_present = subject_l in text_l
+    role_present = role_l in text_l
+
+    if not (name_present and role_present):
+        return {"status": "NEUTRAL"}
+
+    # 🚫 Block historical phrasing
+    if any(term in text_l for term in FORMER_GUARD_TERMS):
+        return {
+            "status": "CONTRADICTION",
+            "reason": "Historical or former role detected"
+        }
+
+    # ✅ Require explicit current assertion
+    current_confirmed = (
+        f"{subject_l} is {role_l}" in text_l
+        or f"{subject_l} currently serves as {role_l}" in text_l
+        or f"is the current {role_l}" in text_l
+    )
+
+    if current_confirmed:
+        return {"status": "SUPPORTED"}
+
+    return {"status": "NEUTRAL"}
+
+def is_time_sensitive_role(role: str) -> bool:
+    if not role:
+        return False
+    role_l = role.lower()
+    return any(r in role_l for r in TIME_SENSITIVE_ROLES)
+
+
 def is_boilerplate(text: str) -> bool:
     t = text.lower()
     hits = sum(1 for p in BOILERPLATE_PHRASES if p in t)
@@ -1399,6 +1470,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
         if page_type == "PROFILE":
             # protect is_negated existence
             _is_negated = bool(is_negated)
+
             if url not in profile_cache:
                 profile_cache[url] = extract_profile_roles(url)
 
@@ -1406,173 +1478,156 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
             role_blocks = profile_data.get("roles", [])
             profile_names = profile_data.get("names", [])
-            
+
             print("🧠 PROFILE NAMES EXTRACTED:", profile_names)
             print("🧠 PROFILE ROLES EXTRACTED:", role_blocks)
 
+            # -------------------------------------------------
+            # ✅ FIX: Properly extract BOTH subject and role
+            # -------------------------------------------------
+            subject, claim_role = cached_claim_parse(claim)
 
-
-            # quick name mismatch filter (same as earlier)
-            subject, _ = cached_claim_parse(claim)
             print("🧠 CLAIM SUBJECT:", subject)
+            print("🧠 CLAIM ROLE:", claim_role)
+
             best_name = choose_best_profile_name(subject, profile_names)
             print("🧠 BEST PROFILE NAME:", best_name)
+
             if subject and profile_names and not name_matches(subject, profile_names):
                 # skip this profile page
                 continue
 
             # POSITIVE claim fast-path — exact name+role match => REAL
-            if role_blocks:
-                subject, _ = cached_claim_parse(claim)
-                if subject:
-                    claim_role = role
-                    name_match = name_matches(subject, profile_names)
+            if role_blocks and subject and claim_role:
+
+                name_match = name_matches(subject, profile_names)
+
+                role_match = any(
+                    role_matches_strict(claim_role, r)
+                    for r in role_blocks
+                )
+
+                # ==========================================================
+                # 🧠 MODEL-5 IDENTITY AUTHORITY BLOCK
+                # ==========================================================
+
+                if page_type == "PROFILE" and profile_names and role_blocks:
+
+                    print("🧠 MODEL-5 AUTHORITY CHECK START")
+
+                    # Expand multi-role strings safely
+                    expanded_roles = []
+
+                    for r in role_blocks:
+                        parts = re.split(r"[,&/]| and ", r.lower())
+                        for p in parts:
+                            p = p.strip()
+                            if p:
+                                expanded_roles.append(p)
+
                     role_match = any(
-                                    role_matches_strict(claim_role, r)
-                                    for r in role_blocks
-                                )
-                    # ==========================================================
-                    # 🧠 MODEL-5 IDENTITY AUTHORITY BLOCK
-                    # ==========================================================
+                        role_matches_strict(claim_role, er)
+                        for er in expanded_roles
+                    )
 
-                    if page_type == "PROFILE" and profile_names and role_blocks:
+                    print("🧠 MODEL-5 NAME MATCH:", name_match)
+                    print("🧠 MODEL-5 ROLE MATCH:", role_match)
 
-                        print("🧠 MODEL-5 AUTHORITY CHECK START")
+                    if name_match:
 
-                        # ✅ name match
-                        name_match = name_matches(subject, profile_names)
+                        # ==================================================
+                        # 🚨 NEGATED CLAIM LOGIC
+                        # ==================================================
+                        if _is_negated:
 
-                        # ✅ multi-role safe matching
-                        # role_match = any(
-                        #     role_matches_strict(claim_role, r)
-                        #     for r in role_blocks
-                        # )
-                        expanded_roles = []
+                            if role_match:
+                                print("🔒 MODEL-5 NEGATED CONTRADICTION — FINAL FAKE")
 
-                        for r in role_blocks:
-                            # Split on common separators
-                            parts = re.split(r"[,&/]| and ", r.lower())
-                            for p in parts:
-                                p = p.strip()
-                                if p:
-                                    expanded_roles.append(p)
+                                return {
+                                    "status": "CONTRADICTION",
+                                    "finalLabel": "FAKE",
+                                    "confidencePercent": 96,
+                                    "summary": "Official profile confirms the role exists, contradicting the negated claim.",
+                                    "aiExplanation": (
+                                        "An authoritative institutional profile confirms the academic role. "
+                                        "Because the claim denies this role, it is false."
+                                    ),
+                                    "keywords": keywords,
+                                    "evidence": [{
+                                        "url": url,
+                                        "snippet": f"{best_name} — {role_blocks[0]}",
+                                        "score": 0.97,
+                                        "page_type": "PROFILE"
+                                    }]
+                                }
 
-                        role_match = any(
-                            role_matches_strict(claim_role, er)
-                            for er in expanded_roles
-                        )
-
-
-                        print("🧠 MODEL-5 NAME MATCH:", name_match)
-                        print("🧠 MODEL-5 ROLE MATCH:", role_match)
-
-                        if name_match:
-
-                            # ==================================================
-                            # 🚨 NEGATED CLAIM LOGIC
-                            # ==================================================
-                            if _is_negated:
-
-                                if role_match:
-                                    print("🔒 MODEL-5 NEGATED CONTRADICTION — FINAL FAKE")
-                                    contradiction_detected = True
-                                    if semantic_score >= 0.85 and is_trusted_domain(url):
-                                        contradiction_found = True
-
-                                    fake_count += 1
-
-                                    return {
-                                        "status": "CONTRADICTION",
-                                        "finalLabel": "FAKE",
-                                        "confidencePercent": 96,
-                                        
-                                        "summary": "Official profile confirms the role exists, contradicting the negated claim.",
-                                        "aiExplanation": (
-                                            "An authoritative institutional profile confirms the academic role. "
-                                            "Because the claim denies this role, it is false."
-                                        ),
-                                        "keywords": keywords,
-                                        "evidence": [{
-                                            "url": url,
-                                            "snippet": f"{best_name} — {role_blocks[0]}",
-                                            "score": 0.97,
-                                            "page_type": "PROFILE"
-                                        }]
-                                    }
-
-                                else:
-                                    print("🛑 MODEL-5 NEGATED CLAIM VERIFIED — FINAL REAL")
-
-                                    return {
-                                        "status": "SUPPORTED",
-                                        "finalLabel": "REAL",
-                                        "confidencePercent": 94,
-                                        
-                                        "summary": "Official profile supports the negated claim.",
-                                        "aiExplanation": (
-                                            "The institutional profile does not show the denied role, "
-                                            "supporting the negated statement."
-                                        ),
-                                        "keywords": keywords,
-                                        "evidence": [{
-                                            "url": url,
-                                            "snippet": f"{best_name} — {role_blocks[0]}",
-                                            "score": 0.94,
-                                            "page_type": "PROFILE"
-                                        }]
-                                    }
-
-                            # ==================================================
-                            # ✅ POSITIVE CLAIM LOGIC
-                            # ==================================================
                             else:
+                                print("🛑 MODEL-5 NEGATED CLAIM VERIFIED — FINAL REAL")
 
-                                if role_match:
-                                    print("🛑 MODEL-5 PROFILE SUPPORT — FINAL REAL")
+                                return {
+                                    "status": "SUPPORTED",
+                                    "finalLabel": "REAL",
+                                    "confidencePercent": 94,
+                                    "summary": "Official profile supports the negated claim.",
+                                    "aiExplanation": (
+                                        "The institutional profile does not show the denied role, "
+                                        "supporting the negated statement."
+                                    ),
+                                    "keywords": keywords,
+                                    "evidence": [{
+                                        "url": url,
+                                        "snippet": f"{best_name} — {role_blocks[0]}",
+                                        "score": 0.94,
+                                        "page_type": "PROFILE"
+                                    }]
+                                }
 
-                                    return {
-                                        "status": "SUPPORTED",
-                                        "finalLabel": "REAL",
-                                        "confidencePercent": 95,
-                                        "summary": "Official institutional profile confirms the claimed role.",
-                                        "aiExplanation": (
-                                            "An authoritative institutional profile verifies the academic role."
-                                        ),
-                                        "keywords": keywords,
-                                        "evidence": [{
-                                            "url": url,
-                                            "snippet": f"{best_name} — {role_blocks[0]}",
-                                            "score": 0.96,
-                                            "page_type": "PROFILE"
-                                        }]
-                                    }
+                        # ==================================================
+                        # ✅ POSITIVE CLAIM LOGIC
+                        # ==================================================
+                        else:
 
-                                else:
-                                    print("🚨 MODEL-5 PROFILE CONTRADICTION — FINAL FAKE")
-                                    contradiction_detected = True
-                                    if semantic_score >= 0.85 and is_trusted_domain(url):
-                                        print("debug semantic score:", semantic_score)
-                                        contradiction_found = True
-                                    fake_count += 1
+                            if role_match:
+                                print("🛑 MODEL-5 PROFILE SUPPORT — FINAL REAL")
 
-                                    return {
-                                        "status": "CONTRADICTION",
-                                        "finalLabel": "FAKE",
-                                        "confidencePercent": 95,
-                                        "summary": "Official institutional profile contradicts the claimed role.",
-                                        "aiExplanation": (
-                                            "The institutional profile lists a different academic rank. "
-                                            "Hierarchy mismatch indicates the claim is false."
-                                        ),
-                                        "keywords": keywords,
-                                        "evidence": [{
-                                            "url": url,
-                                            "snippet": f"{best_name} — {role_blocks[0]}",
-                                            "score": 0.97,
-                                            "page_type": "PROFILE"
-                                        }]
-                                    }
+                                return {
+                                    "status": "SUPPORTED",
+                                    "finalLabel": "REAL",
+                                    "confidencePercent": 95,
+                                    "summary": "Official institutional profile confirms the claimed role.",
+                                    "aiExplanation": (
+                                        "An authoritative institutional profile verifies the academic role."
+                                    ),
+                                    "keywords": keywords,
+                                    "evidence": [{
+                                        "url": url,
+                                        "snippet": f"{best_name} — {role_blocks[0]}",
+                                        "score": 0.96,
+                                        "page_type": "PROFILE"
+                                    }]
+                                }
 
+                            else:
+                                print("🚨 MODEL-5 PROFILE CONTRADICTION — FINAL FAKE")
+
+                                return {
+                                    "status": "CONTRADICTION",
+                                    "finalLabel": "FAKE",
+                                    "confidencePercent": 95,
+                                    "summary": "Official institutional profile contradicts the claimed role.",
+                                    "aiExplanation": (
+                                        "The institutional profile lists a different academic rank. "
+                                        "Hierarchy mismatch indicates the claim is false."
+                                    ),
+                                    "keywords": keywords,
+                                    "evidence": [{
+                                        "url": url,
+                                        "snippet": f"{best_name} — {role_blocks[0]}",
+                                        "score": 0.97,
+                                        "page_type": "PROFILE"
+                                    }]
+                                }
+     
             # FALLBACK identity extraction handling (unchanged)
             soup = BeautifulSoup(html, "html.parser")
             identity_text = extract_profile_identity_text(soup)
@@ -1750,99 +1805,211 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
                     clean_snippet = extract_best_evidence_sentence(text, claim)
 
-                    # ------------------------------------------------------
-                    # CASE 1️⃣ ROLE FOUND IN WIKI
-                    # ------------------------------------------------------
-                    if name_match and role_match:
 
-                        if is_negated:
-                            print("🔒 NEGATED + WIKI ROLE MATCH → FINAL FAKE")
+                    if name_match:
 
-                            return {
-                                "status": "CONTRADICTION",
-                                "finalLabel": "FAKE",
-                                "confidencePercent": 97,
-                                "summary": "Wikipedia confirms the role, contradicting the negated claim.",
-                                "aiExplanation": (
-                                    f"Wikipedia clearly states that {subject} is {role}, "
-                                    "which contradicts the negated claim."
-                                ),
-                                "keywords": keywords,
-                                "evidence": [{
-                                    "url": url,
-                                    "snippet": clean_snippet,
-                                    "score": 0.98,
-                                    "page_type": "ARTICLE"
-                                }]
-                            }
+                        # ======================================================
+                        # 🔥 TIME-SENSITIVE ROLE HANDLING
+                        # ======================================================
+                        if is_time_sensitive_role(role):
 
+                            temporal_result = validate_current_role(subject, role, text)
+                            print("🧠 TEMPORAL VALIDATION RESULT:", temporal_result)
+
+                            # --------------------------------------------------
+                            # CURRENT ROLE CONFIRMED
+                            # --------------------------------------------------
+                            if temporal_result.get("status") == "SUPPORTED":
+
+                                if is_negated:
+                                    print("🔒 NEGATED + CURRENT ROLE CONFIRMED → FINAL FAKE")
+
+                                    return {
+                                        "status": "CONTRADICTION",
+                                        "finalLabel": "FAKE",
+                                        "confidencePercent": 97,
+                                        "summary": "Wikipedia confirms the current role, contradicting the negated claim.",
+                                        "aiExplanation": (
+                                            f"Wikipedia confirms that {subject} currently holds the role of {role}, "
+                                            "which contradicts the negated claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.98,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
+
+                                else:
+                                    print("🔒 CURRENT ROLE CONFIRMED → FINAL REAL")
+
+                                    return {
+                                        "status": "SUPPORTED",
+                                        "finalLabel": "REAL",
+                                        "confidencePercent": 97,
+                                        "summary": "Wikipedia confirms the current role.",
+                                        "aiExplanation": (
+                                            f"Wikipedia explicitly confirms that {subject} currently serves as {role}."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.98,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
+
+                            # --------------------------------------------------
+                            # HISTORICAL ROLE DETECTED (e.g., 'served', 'former', 'first')
+                            # --------------------------------------------------
+                            elif temporal_result.get("status") == "CONTRADICTION":
+
+                                if is_negated:
+                                    print("🔒 NEGATED CLAIM + HISTORICAL ROLE → FINAL REAL")
+
+                                    return {
+                                        "status": "SUPPORTED",
+                                        "finalLabel": "REAL",
+                                        "confidencePercent": 96,
+                                        "summary": "Wikipedia indicates the role is historical, supporting the negated claim.",
+                                        "aiExplanation": (
+                                            f"Wikipedia shows that {subject} previously held the role of {role}, "
+                                            "but does not currently hold it, which supports the negated claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.96,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
+
+                                else:
+                                    print("🔒 HISTORICAL ROLE DETECTED → FINAL FAKE")
+
+                                    return {
+                                        "status": "CONTRADICTION",
+                                        "finalLabel": "FAKE",
+                                        "confidencePercent": 96,
+                                        "summary": "Wikipedia indicates the role is historical.",
+                                        "aiExplanation": (
+                                            f"Wikipedia shows that {subject} previously held the role of {role}, "
+                                            "but does not currently hold it. Therefore, the claim is false."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.96,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
+
+                            # --------------------------------------------------
+                            # NEUTRAL → Temporal check inconclusive; continue pipeline
+                            # --------------------------------------------------
+                            else:
+                                print("⚠️ TEMPORAL CHECK INCONCLUSIVE → CONTINUE RAG")
+                                # do not return here; allow the for-loop to continue to other urls
+                                continue
+
+
+                        # ======================================================
+                        # 🧠 NON-TIME-SENSITIVE ROLE (Original Logic with full returns)
+                        # ======================================================
                         else:
-                            print("🔒 WIKI ROLE MATCH → FINAL REAL")
 
-                            return {
-                                "status": "SUPPORTED",
-                                "finalLabel": "REAL",
-                                "confidencePercent": 97,
-                                "summary": "Wikipedia confirms the role.",
-                                "aiExplanation": (
-                                    f"Wikipedia clearly states that {subject} is {role}, "
-                                    "which directly supports the claim."
-                                ),
-                                "keywords": keywords,
-                                "evidence": [{
-                                    "url": url,
-                                    "snippet": clean_snippet,
-                                    "score": 0.98,
-                                    "page_type": "ARTICLE"
-                                }]
-                            }
+                            # CASE: role present in wiki (non-time-sensitive)
+                            if role_match:
 
-                    # ------------------------------------------------------
-                    # CASE 2️⃣ ROLE NOT FOUND IN WIKI
-                    # ------------------------------------------------------
-                    if name_match and not role_match:
+                                if is_negated:
+                                    print("🔒 NEGATED + WIKI ROLE MATCH → FINAL FAKE")
+                                    return {
+                                        "status": "CONTRADICTION",
+                                        "finalLabel": "FAKE",
+                                        "confidencePercent": 97,
+                                        "summary": "Wikipedia confirms the role, contradicting the negated claim.",
+                                        "aiExplanation": (
+                                            f"Wikipedia clearly states that {subject} is {role}, "
+                                            "which contradicts the negated claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.98,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
 
-                        if is_negated:
-                            print("🔒 NEGATED + WIKI ROLE MISMATCH → FINAL REAL")
+                                else:
+                                    print("🔒 WIKI ROLE MATCH → FINAL REAL")
+                                    return {
+                                        "status": "SUPPORTED",
+                                        "finalLabel": "REAL",
+                                        "confidencePercent": 97,
+                                        "summary": "Wikipedia confirms the role.",
+                                        "aiExplanation": (
+                                            f"Wikipedia clearly states that {subject} is {role}, "
+                                            "which directly supports the claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.98,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
 
-                            return {
-                                "status": "SUPPORTED",
-                                "finalLabel": "REAL",
-                                "confidencePercent": 96,
-                                "summary": "Wikipedia does not list that role, supporting the negated claim.",
-                                "aiExplanation": (
-                                    f"Wikipedia does not list {role} as a role for {subject}, "
-                                    "which supports the negated claim."
-                                ),
-                                "keywords": keywords,
-                                "evidence": [{
-                                    "url": url,
-                                    "snippet": clean_snippet,
-                                    "score": 0.96,
-                                    "page_type": "ARTICLE"
-                                }]
-                            }
+                            # CASE: name present but role not found in wiki (non-time-sensitive)
+                            if not role_match:
 
-                        else:
-                            print("🔒 WIKI ROLE MISMATCH → FINAL FAKE")
+                                if is_negated:
+                                    print("🔒 NEGATED + WIKI ROLE MISMATCH → FINAL REAL")
+                                    return {
+                                        "status": "SUPPORTED",
+                                        "finalLabel": "REAL",
+                                        "confidencePercent": 96,
+                                        "summary": "Wikipedia does not list that role, supporting the negated claim.",
+                                        "aiExplanation": (
+                                            f"Wikipedia does not list {role} as a role for {subject}, "
+                                            "which supports the negated claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.96,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
 
-                            return {
-                                "status": "CONTRADICTION",
-                                "finalLabel": "FAKE",
-                                "confidencePercent": 96,
-                                "summary": "Wikipedia contradicts the role.",
-                                "aiExplanation": (
-                                    f"Wikipedia does not list {role} as a role for {subject}, "
-                                    "which contradicts the claim."
-                                ),
-                                "keywords": keywords,
-                                "evidence": [{
-                                    "url": url,
-                                    "snippet": clean_snippet,
-                                    "score": 0.96,
-                                    "page_type": "ARTICLE"
-                                }]
-                            }
+                                else:
+                                    print("🔒 WIKI ROLE MISMATCH → FINAL FAKE")
+                                    return {
+                                        "status": "CONTRADICTION",
+                                        "finalLabel": "FAKE",
+                                        "confidencePercent": 96,
+                                        "summary": "Wikipedia contradicts the role.",
+                                        "aiExplanation": (
+                                            f"Wikipedia does not list {role} as a role for {subject}, "
+                                            "which contradicts the claim."
+                                        ),
+                                        "keywords": keywords,
+                                        "evidence": [{
+                                            "url": url,
+                                            "snippet": clean_snippet,
+                                            "score": 0.96,
+                                            "page_type": "ARTICLE"
+                                        }]
+                                    }
+
+                    # If name_match is False, fall through to the rest of the article processing below
 
         # ⚡ TEXT LIGHT MODE — keep only important section
         if len(text.split()) > 600:
