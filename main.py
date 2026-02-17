@@ -8123,20 +8123,20 @@ def predict_text(data: InputText):
             continue
         print("AFTER SUBJECT")
 
-        if is_absurd_or_vague_claim(c):
-            return build_ui_response({
-                "finalLabel": "FAKE",
-                "confidencePercent": 95,
-                "summary": "The claim contains an implausible or logically impossible assertion.",
-                "aiExplanation": "The claim was rejected before retrieval because it violates basic plausibility or contains an impossible role or entity.",
-                "keywords": keywords,
-                "language": language_name,
-                "sentiment": sentiment,
-                "factCheckUsed": False,
-                "factCheckSource": None,
-                "verificationMethod": "PLAUSIBILITY_FILTER",
-                "evidence": []
-            })
+        # if is_absurd_or_vague_claim(c):
+        #     return build_ui_response({
+        #         "finalLabel": "FAKE",
+        #         "confidencePercent": 95,
+        #         "summary": "The claim contains an implausible or logically impossible assertion.",
+        #         "aiExplanation": "The claim was rejected before retrieval because it violates basic plausibility or contains an impossible role or entity.",
+        #         "keywords": keywords,
+        #         "language": language_name,
+        #         "sentiment": sentiment,
+        #         "factCheckUsed": False,
+        #         "factCheckSource": None,
+        #         "verificationMethod": "PLAUSIBILITY_FILTER",
+        #         "evidence": []
+        #     })
 
 
         result = verify_claim_with_rag(c, detected_lang)
@@ -8877,11 +8877,6 @@ def predict_image(data: InputImage):
     claim_text = final_claim_text
     detected_lang = detected_lang or safe_language_detect(claim_text)
 
-    # continue with your existing code:
-    # - translate if needed
-    # - universal_rag_retrieve
-    # - verify/semantic logic
-    # - build_ui_response
     response = predict_text(InputText(text=claim_text))
 
     return response
