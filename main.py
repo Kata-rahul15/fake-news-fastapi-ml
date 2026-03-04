@@ -4,7 +4,9 @@ import os
 os.environ["PYTHONUNBUFFERED"] = "1"
 import builtins
 import functools
-builtins.print = functools.partial(print, flush=True)
+
+_original_print = builtins.print
+builtins.print = functools.partial(_original_print, flush=True)
 from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -68,6 +70,10 @@ def health():
         "model_loaded": True
     }
 
+@app.get("/test-log")
+def test():
+    print("TEST LOG WORKING")
+    return {"ok": True}
 # =========================================================
 # CONFIGURATION
 # =========================================================
@@ -226,7 +232,6 @@ def cached_sentences(text: str):
 
 @lru_cache(maxsize=512)
 def cached_claim_parse(claim: str):
-    print("IN CACHE FUNCTION")
     return (
         extract_subject_from_claim(claim),
         extract_role_from_claim(claim)
