@@ -63,12 +63,6 @@ def root():
         "health": "/health"
     }
     
-@app.get("/health")
-def health():
-    return {
-        "api": "ok",
-        "model_loaded": True
-    }
 
 import logging
 
@@ -76,7 +70,7 @@ logger = logging.getLogger("uvicorn")
 
 @app.get("/health")
 def health():
-    
+
     logger.info("HEALTH ENDPOINT CALLED")
     return {"api": "ok", "model_loaded": True}
 # =========================================================
