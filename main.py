@@ -1053,15 +1053,18 @@ def verify_role(claim_role: str | None,
                     except Exception:
                         strict_ok = False
                     # if strict returns False but ranks differ, treat as hierarchy mismatch
-                    if not strict_ok:
+                    # if not strict_ok:
                         
-                        # strong contradiction when both are ranked but strict check fails
-                        return {
-                            "status": "MISMATCH",
-                            "confidence": 0.90,
-                            "matched_role": ev_role,
-                            "reason": f"Authority/hierarchy mismatch between claim role '{claim_role_norm}' and evidence role '{ev_role}'"
-                        }
+                    #     # strong contradiction when both are ranked but strict check fails
+                    #     return {
+                    #         "status": "MISMATCH",
+                    #         "confidence": 0.90,
+                    #         "matched_role": ev_role,
+                    #         "reason": f"Authority/hierarchy mismatch between claim role '{claim_role_norm}' and evidence role '{ev_role}'"
+                    #     }
+                    if not strict_ok:
+                        # do not return yet — continue checking other roles
+                        continue
             except Exception:
                 # don't crash; continue to other checks
                 pass
@@ -1432,7 +1435,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
 
             best_name = choose_best_profile_name(subject, profile_names)
             print("🧠 BEST PROFILE NAME:", best_name)
-
+ 
             if subject and profile_names and not name_matches(subject, profile_names):
                 # skip this profile page
                 continue
@@ -1611,6 +1614,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
                     continue
 
             if identity_text and claim_type in {"IDENTITY_ROLE", "POSITIONAL_ROLE"} and not _is_negated:
+                subject, role = cached_claim_parse(claim)
                 if subject and role:
                     subject_tokens = [t.lower() for t in subject.split() if len(t) > 2]
                     text_l = identity_text.lower()
