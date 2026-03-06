@@ -5073,6 +5073,17 @@ nli_model = pipeline(
 # =========================================================
 # 🔥 GLOBAL PADDLE OCR ENGINE (LOAD ONCE)
 # =========================================================
+
+import os
+import shutil
+
+ocr_cache = "/root/.paddleocr"
+
+if os.path.exists(ocr_cache):
+    print("Clearing corrupted PaddleOCR cache...")
+    shutil.rmtree(ocr_cache)
+
+
 _ocr_reader = None
 
 def get_ocr():
