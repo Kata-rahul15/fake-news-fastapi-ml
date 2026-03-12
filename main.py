@@ -74,6 +74,14 @@ def health():
 
     logger.info("HEALTH ENDPOINT CALLED")
     return {"api": "ok", "model_loaded": True}
+
+
+@app.on_event("startup")
+def load_models():
+    get_ocr()
+    get_similarity_model()
+    get_model()
+    
 # =========================================================
 # CONFIGURATION
 # =========================================================
@@ -5071,13 +5079,8 @@ nli_model = pipeline(
 # =========================================================
 # 🔥 GLOBAL PADDLE OCR ENGINE (LOAD ONCE)
 # =========================================================
-
-import shutil
-import threading
-
 _ocr_reader = None
 ocr_lock = threading.Lock()
-
 
 def get_ocr():
     global _ocr_reader
@@ -5085,10 +5088,11 @@ def get_ocr():
     if _ocr_reader is None:
         with ocr_lock:
             if _ocr_reader is None:
-                print("🧠 Initializing PaddleOCR...")
+                print("🧠 Loading PaddleOCR...")
                 _ocr_reader = PaddleOCR(
-                    use_angle_cls=True,
+                    use_angle_cls=False,
                     lang="en",
+                    use_gpu=False,
                     show_log=False
                 )
                 print("✅ PaddleOCR loaded")
