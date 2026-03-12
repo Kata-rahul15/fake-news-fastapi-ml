@@ -5066,9 +5066,6 @@ nli_model = pipeline(
     "text-classification",
     model="cross-encoder/nli-deberta-v3-small"
 )
-# =========================================================
-# OCR
-# =========================================================
 
 # =========================================================
 # 🔥 GLOBAL PADDLE OCR ENGINE (LOAD ONCE)
