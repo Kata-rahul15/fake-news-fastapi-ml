@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 from langdetect import detect
 from difflib import SequenceMatcher
+import threading
 import base64
 import numpy as np
 from PIL import Image
@@ -5071,29 +5072,28 @@ nli_model = pipeline(
 # 🔥 GLOBAL PADDLE OCR ENGINE (LOAD ONCE)
 # =========================================================
 
-import os
 import shutil
-
-ocr_cache = "/root/.paddleocr"
-
-if os.path.exists(ocr_cache):
-    print("Clearing corrupted PaddleOCR cache...")
-    shutil.rmtree(ocr_cache)
-
+import threading
 
 _ocr_reader = None
+ocr_lock = threading.Lock()
+
 
 def get_ocr():
     global _ocr_reader
-    if _ocr_reader is None:
-        print("🔄 Loading PaddleOCR...")
-        _ocr_reader = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            show_log=False
-        )
-    return _ocr_reader
 
+    if _ocr_reader is None:
+        with ocr_lock:
+            if _ocr_reader is None:
+                print("🧠 Initializing PaddleOCR...")
+                _ocr_reader = PaddleOCR(
+                    use_angle_cls=True,
+                    lang="en",
+                    show_log=False
+                )
+                print("✅ PaddleOCR loaded")
+
+    return _ocr_reader
 # =========================================================
 # INPUT SCHEMAS
 # =========================================================
