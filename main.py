@@ -2179,6 +2179,7 @@ def universal_rag_retrieve(claim: str, urls: list[str], sim_threshold=0.7, top_k
         role_result = None
 
         if claim_type == "IDENTITY_ROLE":
+            subject, role = cached_claim_parse(claim)
             role_result = verify_role(role, text)
             print("role result new feature",role_result)
 
